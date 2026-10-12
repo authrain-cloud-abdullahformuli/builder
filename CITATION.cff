@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use AI Builder, please cite it using these metadata."
+title: "AI Builder: Open-Source AI Website and App Builder"
+type: software
+authors:
+  - family-names: "Formuli"
+    given-names: "Abdullah"
+    email: "authrainmedia@gmail.com"
+    website: "https://github.com/authrain-cloud-abdullahformuli"
+url: "https://github.com/authrain-cloud-abdullahformuli/builder"
+repository-code: "https://github.com/authrain-cloud-abdullahformuli/builder"
+license: Apache-2.0
+keywords:
+  - ai-builder
+  - website-builder
+  - app-builder
+  - puter
+  - open-source
+  - vite
+  - web-os

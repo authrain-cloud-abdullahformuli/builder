@@ -1,0 +1,146 @@
+import fs from 'node:fs';
+
+// ---- Regression guard: Enter on the delete modal's Cancel must cancel -------
+// confirmByTyping (ui.js) arms a document-level keydown handler so Enter
+// confirms once the user has typed the confirmation word, wherever focus sits.
+// Focus can sit on the Cancel button — it is the first Tab stop after the
+// input — and Enter there used to reach this handler BEFORE the button's own
+// activation, so pressing Enter on "Cancel" permanently deleted the project.
+// The handler must leave Enter alone when it is aimed at a button, so the
+// button's native click (Cancel → close(false), Delete → close(true)) decides.
+
+let failures = 0;
+function check(name, cond, detail) {
+    if (cond) console.log('ok   - ' + name);
+    else { console.error('FAIL - ' + name + (detail ? '\n       ' + detail : '')); failures++; }
+}
+
+const ui = fs.readFileSync(new URL('../src/js/ui.js', import.meta.url), 'utf8');
+const start = ui.indexOf('function confirmByTyping(');
+const end = ui.indexOf('function formatPropertyDate(');
+check('confirmByTyping is present in ui.js', start >= 0 && end > start);
+const body = ui.slice(start, end);
+
+const handlerAt = body.indexOf("$(document).on('keydown.confirmModal'");
+check('a document-level keydown handler exists for the modal', handlerAt >= 0);
+const handler = body.slice(handlerAt, body.indexOf('});', handlerAt) + 3);
+const enterLine = handler.split('\n').find(l => l.includes("e.key === 'Enter'") && !l.trim().startsWith('//')) || '';
+check('the document-level Enter still requires the typed word to match', enterLine.includes('matches()'));
+check('… and is skipped when the key is aimed at a button (Cancel keeps its own activation)',
+    /!\$\(e\.target\)\.is\('button'\)/.test(enterLine));
+check('the Cancel button still resolves false', /\$cancel\.on\('click', \(\) => close\(false\)\)/.test(body));
+check('the Delete button still resolves true only on a match', /\$confirm\.on\('click', \(\) => \{ if \(matches\(\)\) close\(true\); \}\)/.test(body));
+
+// ---- The dialogs' focus trap holds from wherever focus starts -----------------
+// trapDialogFocus listened on the overlay, so it heard nothing once focus had
+// left it — and the Settings/MCP dialogs open with focus on their own container
+// (tabindex -1, not a Tab stop), from which Shift+Tab is the browser's to take
+// to the page behind the backdrop. A re-render that removed the focused control
+// dropped focus to <body>, outside the trap's hearing too. Runs the real
+// function against a stub document/jQuery.
+{
+    const a = ui.indexOf('function trapDialogFocus($overlay) {');
+    const b = ui.indexOf('\n}\n', a);
+    const listeners = [];
+    const doc = {
+        activeElement: null,
+        body: { name: 'body' },
+        addEventListener: (type, fn, capture) => listeners.push({ type, fn, capture }),
+        removeEventListener: (type, fn) => { const i = listeners.findIndex(l => l.fn === fn); if (i >= 0) listeners.splice(i, 1); },
+        contains: () => true,
+    };
+    doc.activeElement = doc.body;
+    const el = (name, focusable) => ({ name, focusable, focus() { doc.activeElement = this; } });
+    const container = el('dialog-container', false);
+    const close = el('close', true), input = el('input', true), submit = el('submit', true);
+    const inDialog = new Set([container, close, input, submit]);
+    const overlay = { contains: (x) => inDialog.has(x) };
+    const $overlay = Object.assign([overlay], { find: () => ({ filter: () => ({ toArray: () => [close, input, submit] }) }) });
+    const $ = (x) => ({ is: () => !!(x && x.focusable) });
+    const trap = new Function('document', '$', ui.slice(a, b + 2) + '\nreturn trapDialogFocus;')(doc, $);
+    const release = trap($overlay);
+    const press = (shiftKey) => {
+        const ev = { key: 'Tab', shiftKey, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+        for (const l of [...listeners]) if (l.type === 'keydown') l.fn(ev);
+        return ev.defaultPrevented;
+    };
+    check('focus trap: listens on the document, in the capture phase',
+        listeners.length === 1 && listeners[0].type === 'keydown' && listeners[0].capture === true);
+    container.focus();
+    check('focus trap: Shift+Tab from the dialog container goes to its last control, not the page behind',
+        press(true) && doc.activeElement === submit, doc.activeElement.name);
+    doc.activeElement = doc.body;
+    check('focus trap: Tab with focus dropped to <body> lands on the first control',
+        press(false) && doc.activeElement === close, doc.activeElement.name);
+    input.focus();
+    check('focus trap: Tab between controls is left to the browser', press(false) === false && doc.activeElement === input);
+    submit.focus();
+    check('focus trap: Tab from the last control wraps to the first', press(false) && doc.activeElement === close);
+    const alertButton = el('puter-alert-ok', true);
+    alertButton.focus();
+    check('focus trap: focus in something opened over the dialog (a Puter alert) is not pulled back',
+        press(false) === false && doc.activeElement === alertButton);
+    release();
+    check('focus trap: closing the dialog removes its listener', listeners.length === 0);
+}
+
+// ---- The ⋮ that opened Settings gets focus back even after a sidebar rebuild --
+// Publishing or renaming from Settings changes what the sidebar entry shows, so
+// the list rebuilds while the dialog is up and the ⋮ that opened it is replaced.
+// Closing the dialog then had nothing to return focus to: it fell to <body>.
+{
+    const a = ui.indexOf('function trapDialogFocus($overlay) {');
+    const b = ui.indexOf('\n}\n', a);
+    const connected = new Set();
+    const mkBtn = (id) => ({ classList: { contains: (c) => c === 'chat-menu-btn' }, getAttribute: (k) => (k === 'data-chat-id' ? id : null),
+        focus() { doc.activeElement = this; } });
+    const doc = {
+        activeElement: null, body: { name: 'body' },
+        addEventListener() {}, removeEventListener() {},
+        contains: (x) => connected.has(x),
+    };
+    const overlay = { contains: () => false };
+    const oldBtn = mkBtn('chat1'), newBtn = mkBtn('chat1'), otherBtn = mkBtn('chat2');
+    connected.add(oldBtn); connected.add(otherBtn);
+    doc.activeElement = oldBtn;
+    const $ = (sel) => (sel === '.chat-menu-btn'
+        ? { filter: (fn) => [...connected].filter((el) => el.classList && fn.call(el)) }
+        : { is: () => false });
+    const trap = new Function('document', '$', ui.slice(a, b + 2) + '\nreturn trapDialogFocus;')(doc, $);
+    const release = trap(Object.assign([overlay], { find: () => ({ filter: () => ({ toArray: () => [] }) }) }));
+    // The list rebuilds while the dialog is up: the old ⋮ is replaced.
+    connected.delete(oldBtn); connected.add(newBtn);
+    doc.activeElement = doc.body;   // the dialog's own focus, gone with it on close
+    release();
+    check('closing returns focus to the opening entry\'s rebuilt ⋮', doc.activeElement === newBtn);
+}
+
+// ---- A key aimed at a dialog above this one is not this dialog's ------------
+// Standalone, a Puter alert or sign-in prompt is a native modal <dialog> in
+// this page. The dialogs' document-wide handlers took its keys anyway: Escape
+// on a Puter alert closed Settings underneath it (and the preventDefault
+// cancelled the alert's own Escape, leaving it up), and Enter there — aimed at
+// the alert's host element, not a button — could confirm a typed-word delete.
+{
+    const a = ui.indexOf('function keyIsForDialog(e, overlay) {');
+    const b = ui.indexOf('\n}\n', a);
+    check('keyIsForDialog is present in ui.js', a >= 0);
+    const body = { tag: 'body' }, html = { tag: 'html' }, doc = { body, documentElement: html };
+    const inside = { tag: 'input' }, alertHost = { tag: 'puter-alert' };
+    const overlay = { contains: (x) => x === inside };
+    const isFor = new Function('document', ui.slice(a, b + 2) + '\nreturn keyIsForDialog;')(doc);
+    check('a key aimed inside the dialog is its own', isFor({ target: inside }, overlay) === true);
+    check('a key with focus parked on the page is its own (Escape still closes)', isFor({ target: body }, overlay) && isFor({ target: html }, overlay));
+    check('a key aimed at a Puter alert above it is not', isFor({ target: alertHost }, overlay) === false);
+    const props = ui.slice(ui.indexOf("$(document).on('keydown.propertiesModal'"));
+    check('Settings: its Escape ignores keys aimed elsewhere (and IME composition)',
+        /keydown\.propertiesModal', \(e\) => \{\s*if \(window\.isComposingKeyEvent\(e\) \|\| !keyIsForDialog\(e, \$overlay\[0\]\)\) return;\s*if \(e\.key === 'Escape'\)/.test(props));
+    check('typed-word confirm: its Escape/Enter ignore keys aimed elsewhere',
+        /keydown\.confirmModal', \(e\) => \{\s*if \(window\.isComposingKeyEvent\(e\) \|\| !keyIsForDialog\(e, \$overlay\[0\]\)\) return;/.test(handler));
+    const mcp = fs.readFileSync(new URL('../src/js/mcp-ui.js', import.meta.url), 'utf8');
+    check('MCP connections: its Escape ignores keys aimed elsewhere',
+        /if \(!window\.keyIsForDialog\(e, \$overlay\[0\]\)\) return;[^\n]*\n\s*if \(e\.key === 'Escape'\)/.test(mcp));
+}
+
+if (failures) { console.error(`\n${failures} confirm-modal check(s) failed.`); process.exit(1); }
+console.log('\nAll confirm-modal key checks passed.');
